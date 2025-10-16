@@ -10,7 +10,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.models.llama.modeling_llama import LlamaAttention, LlamaModel
+from transformers.models.llama.modeling_llama import LlamaAttention, LlamaModel, apply_rotary_pos_emb
 from spas_sage_attn.autotune import SparseAttentionMeansim
 from typing import Optional, Tuple
 
@@ -37,7 +37,6 @@ class SparseLlamaAttention(nn.Module):
         
         # 复制必要的属性
         self.config = original_attn.config
-        self.hidden_size = original_attn.hidden_size
         self.num_heads = original_attn.num_heads
         self.head_dim = original_attn.head_dim
         self.num_key_value_heads = original_attn.num_key_value_heads
@@ -45,6 +44,9 @@ class SparseLlamaAttention(nn.Module):
         self.max_position_embeddings = original_attn.max_position_embeddings
         self.rope_theta = original_attn.rope_theta
         self.is_causal = True
+        
+        # hidden_size 从 config 获取
+        self.hidden_size = self.config.hidden_size
         
         # 复制所有的projection层和rotary embedding
         self.q_proj = original_attn.q_proj
@@ -99,13 +101,23 @@ class SparseLlamaAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         
         # RoPE (Rotary Position Embedding)
+        # 根据transformers版本，rotary_emb的调用方式可能不同
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = self.original_attn.apply_rotary_pos_emb(
-            query_states, key_states, cos, sin, position_ids
-        )
+        
+        # 尝试新版本的API
+        try:
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
+        except:
+            # 兼容旧版本API
+            cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+            query_states, key_states = apply_rotary_pos_emb(
+                query_states, key_states, cos, sin, position_ids
+            )
         
         # KV cache
         if past_key_value is not None:
